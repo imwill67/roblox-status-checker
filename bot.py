@@ -1,8 +1,10 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks
+
 import requests
 import os
+
 from dotenv import load_dotenv
 
 
@@ -28,11 +30,17 @@ PLAYER_DISPLAY_NAME = "Will"
 
 intents = discord.Intents.default()
 
-client = discord.Client(intents=intents)
+client = discord.Client(
+    intents=intents
+)
 
-tree = app_commands.CommandTree(client)
+tree = app_commands.CommandTree(
+    client
+)
 
-GUILD = discord.Object(id=GUILD_ID)
+GUILD = discord.Object(
+    id=GUILD_ID
+)
 
 
 # ============================================================
@@ -48,20 +56,48 @@ watch_channel = None
 
 
 # ============================================================
+# GAME CACHE
+# ============================================================
+
+# Saves successful lookups so we don't repeatedly
+# ask Roblox for the same game's name.
+
+game_cache = {}
+
+
+# ============================================================
+# ROBLOX SESSION
+# ============================================================
+
+session = requests.Session()
+
+session.headers.update({
+    "User-Agent": "RobloxStatusChecker/1.0",
+    "Accept": "application/json",
+    "Content-Type": "application/json"
+})
+
+
+# ============================================================
 # ROBLOX PRESENCE
 # ============================================================
 
 def get_roblox_presence():
 
-    url = "https://presence.roblox.com/v1/presence/users"
+    url = (
+        "https://presence.roblox.com/"
+        "v1/presence/users"
+    )
 
-    data = {
-        "userIds": [PLAYER_ID]
+    payload = {
+        "userIds": [
+            PLAYER_ID
+        ]
     }
 
-    response = requests.post(
+    response = session.post(
         url,
-        json=data,
+        json=payload,
         timeout=10
     )
 
@@ -69,14 +105,28 @@ def get_roblox_presence():
 
     data = response.json()
 
-    presences = data.get("userPresences", [])
+    presences = data.get(
+        "userPresences",
+        []
+    )
 
     if not presences:
+
         raise RuntimeError(
             "Roblox returned no presence data."
         )
 
-    return presences[0]
+    presence = presences[0]
+
+    print(
+        "DEBUG - Full Roblox presence:"
+    )
+
+    print(
+        presence
+    )
+
+    return presence
 
 
 # ============================================================
@@ -92,39 +142,71 @@ def get_status_text(presence):
     if presence_type == 0:
         return "Offline"
 
-    elif presence_type == 1:
+    if presence_type == 1:
         return "Online"
 
-    elif presence_type == 2:
+    if presence_type == 2:
         return "In Game"
 
-    elif presence_type == 3:
+    if presence_type == 3:
         return "In Roblox Studio"
 
-    elif presence_type == 4:
+    if presence_type == 4:
         return "Invisible"
 
     return "Unknown"
 
 
 # ============================================================
-# GAME LOOKUP — UNIVERSE ID
+# GAME LOOKUP
 # ============================================================
 
-def get_game_name_from_universe(universe_id):
+def get_game_name_from_universe(
+    universe_id
+):
 
     if not universe_id:
         return None
 
-    url = "https://games.roblox.com/v1/games"
+    # Convert to string because Roblox IDs
+    # can sometimes arrive as integers.
+
+    universe_id = str(
+        universe_id
+    )
+
+    # --------------------------------------------------------
+    # CACHE
+    # --------------------------------------------------------
+
+    if universe_id in game_cache:
+
+        print(
+            f"DEBUG - Game cache hit: "
+            f"{universe_id}"
+        )
+
+        return game_cache[
+            universe_id
+        ]
+
+
+    # --------------------------------------------------------
+    # API REQUEST
+    # --------------------------------------------------------
+
+    url = (
+        "https://games.roblox.com/"
+        "v1/games"
+    )
 
     params = {
-        "universeIds": str(universe_id)
+        "universeIds": universe_id
     }
 
     try:
 
-        response = requests.get(
+        response = session.get(
             url,
             params=params,
             timeout=10
@@ -132,30 +214,61 @@ def get_game_name_from_universe(universe_id):
 
         response.raise_for_status()
 
-        data = response.json().get(
+        data = response.json()
+
+        games = data.get(
             "data",
             []
         )
 
-        if not data:
+        if not games:
+
+            print(
+                f"DEBUG - No game returned "
+                f"for universe {universe_id}"
+            )
+
             return None
 
-        return data[0].get("name")
+
+        game_name = games[0].get(
+            "name"
+        )
+
+
+        if game_name:
+
+            game_cache[
+                universe_id
+            ] = game_name
+
+            print(
+                f"DEBUG - Universe "
+                f"{universe_id} = "
+                f"{game_name}"
+            )
+
+            return game_name
+
 
     except requests.RequestException as error:
 
         print(
-            f"⚠️ Universe game lookup failed: {error}"
+            f"⚠️ Universe lookup failed: "
+            f"{error}"
         )
 
-        return None
+
+    return None
 
 
 # ============================================================
-# GAME LOOKUP — PLACE ID → UNIVERSE ID
+# PLACE ID → UNIVERSE ID
 # ============================================================
 
-def get_universe_from_place(place_id):
+def get_universe_from_place(
+    place_id
+):
 
     if not place_id:
         return None
@@ -168,7 +281,7 @@ def get_universe_from_place(place_id):
 
     try:
 
-        response = requests.get(
+        response = session.get(
             url,
             timeout=10
         )
@@ -177,27 +290,43 @@ def get_universe_from_place(place_id):
 
         data = response.json()
 
-        return data.get("universeId")
+        universe_id = data.get(
+            "universeId"
+        )
+
+        if universe_id:
+
+            print(
+                f"DEBUG - Place "
+                f"{place_id} → Universe "
+                f"{universe_id}"
+            )
+
+        return universe_id
+
 
     except requests.RequestException as error:
 
         print(
-            f"⚠️ Place → universe lookup failed: {error}"
+            f"⚠️ Place → universe lookup "
+            f"failed: {error}"
         )
 
         return None
 
 
 # ============================================================
-# GAME DETECTION
+# CURRENT GAME DETECTION
 # ============================================================
 
-def get_current_game(presence):
+def get_current_game(
+    presence
+):
 
-    # --------------------------------------------------------
-    # METHOD 1:
-    # Direct universeId from Presence API
-    # --------------------------------------------------------
+    # ========================================================
+    # METHOD 1
+    # Direct universeId
+    # ========================================================
 
     universe_id = presence.get(
         "universeId"
@@ -206,21 +335,24 @@ def get_current_game(presence):
     if universe_id:
 
         print(
-            f"DEBUG - Universe ID: {universe_id}"
+            f"DEBUG - Presence supplied "
+            f"universeId: {universe_id}"
         )
 
-        game_name = get_game_name_from_universe(
-            universe_id
+        game_name = (
+            get_game_name_from_universe(
+                universe_id
+            )
         )
 
         if game_name:
             return game_name
 
 
-    # --------------------------------------------------------
-    # METHOD 2:
-    # placeId → universeId → game name
-    # --------------------------------------------------------
+    # ========================================================
+    # METHOD 2
+    # placeId → universeId
+    # ========================================================
 
     place_id = presence.get(
         "placeId"
@@ -229,32 +361,67 @@ def get_current_game(presence):
     if place_id:
 
         print(
-            f"DEBUG - Place ID: {place_id}"
+            f"DEBUG - Presence supplied "
+            f"placeId: {place_id}"
         )
 
-        universe_id = get_universe_from_place(
-            place_id
+        universe_id = (
+            get_universe_from_place(
+                place_id
+            )
         )
 
         if universe_id:
 
-            print(
-                f"DEBUG - Universe ID from place: "
-                f"{universe_id}"
-            )
-
-            game_name = get_game_name_from_universe(
-                universe_id
+            game_name = (
+                get_game_name_from_universe(
+                    universe_id
+                )
             )
 
             if game_name:
                 return game_name
 
 
-    # --------------------------------------------------------
-    # METHOD 3:
-    # lastLocation fallback
-    # --------------------------------------------------------
+    # ========================================================
+    # METHOD 3
+    # rootPlaceId → universeId
+    # ========================================================
+
+    root_place_id = presence.get(
+        "rootPlaceId"
+    )
+
+    if root_place_id:
+
+        print(
+            f"DEBUG - Presence supplied "
+            f"rootPlaceId: "
+            f"{root_place_id}"
+        )
+
+        universe_id = (
+            get_universe_from_place(
+                root_place_id
+            )
+        )
+
+        if universe_id:
+
+            game_name = (
+                get_game_name_from_universe(
+                    universe_id
+                )
+            )
+
+            if game_name:
+                return game_name
+
+
+    # ========================================================
+    # METHOD 4
+    # lastLocation
+    # ========================================================
 
     last_location = presence.get(
         "lastLocation"
@@ -262,47 +429,86 @@ def get_current_game(presence):
 
     if last_location:
 
+        print(
+            f"DEBUG - Using lastLocation: "
+            f"{last_location}"
+        )
+
         return last_location
 
 
-    # --------------------------------------------------------
-    # No game information available
-    # --------------------------------------------------------
+    # ========================================================
+    # NOTHING AVAILABLE
+    # ========================================================
 
     print(
-        "⚠️ Roblox reported In Game, "
-        "but no usable game information "
-        "was provided."
+        "⚠️ Roblox says the player is "
+        "In Game, but the experience "
+        "information is unavailable."
+    )
+
+    print(
+        "DEBUG - placeId:",
+        presence.get("placeId")
+    )
+
+    print(
+        "DEBUG - rootPlaceId:",
+        presence.get("rootPlaceId")
+    )
+
+    print(
+        "DEBUG - gameId:",
+        presence.get("gameId")
+    )
+
+    print(
+        "DEBUG - universeId:",
+        presence.get("universeId")
+    )
+
+    print(
+        "DEBUG - lastLocation:",
+        presence.get("lastLocation")
     )
 
     return None
 
 
 # ============================================================
-# GET CURRENT PLAYER STATE
+# CURRENT PLAYER STATE
 # ============================================================
 
 def get_current_player_state():
 
-    presence = get_roblox_presence()
+    presence = (
+        get_roblox_presence()
+    )
 
-    current_status = get_status_text(
-        presence
+    current_status = (
+        get_status_text(
+            presence
+        )
     )
 
     current_game = None
 
     if current_status == "In Game":
 
-        current_game = get_current_game(
-            presence
+        current_game = (
+            get_current_game(
+                presence
+            )
         )
 
-    return current_status, current_game
+    return (
+        current_status,
+        current_game
+    )
 
 
 # ============================================================
-# DISCORD EVENTS
+# DISCORD READY
 # ============================================================
 
 @client.event
@@ -326,7 +532,7 @@ async def on_ready():
 
 
 # ============================================================
-# /ping
+# /PING
 # ============================================================
 
 @tree.command(
@@ -344,12 +550,15 @@ async def ping(
 
 
 # ============================================================
-# /status
+# /STATUS
 # ============================================================
 
 @tree.command(
     name="status",
-    description="Immediately check the Roblox player's current status.",
+    description=(
+        "Immediately check the Roblox "
+        "player's current status."
+    ),
     guild=GUILD
 )
 async def status(
@@ -358,15 +567,14 @@ async def status(
 
     try:
 
-        presence = get_roblox_presence()
-
-        print(
-            "DEBUG - Roblox response:",
-            presence
+        presence = (
+            get_roblox_presence()
         )
 
-        current_status = get_status_text(
-            presence
+        current_status = (
+            get_status_text(
+                presence
+            )
         )
 
         # ----------------------------------------------------
@@ -375,16 +583,18 @@ async def status(
 
         if current_status == "In Game":
 
-            game_name = get_current_game(
-                presence
+            game_name = (
+                get_current_game(
+                    presence
+                )
             )
 
             if game_name:
 
                 await interaction.response.send_message(
                     f"**{PLAYER_DISPLAY_NAME}** "
-                    f"(**{PLAYER_USERNAME}**) is currently "
-                    f"**In Game** 🎮\n"
+                    f"(**{PLAYER_USERNAME}**) "
+                    f"is currently **In Game** 🎮\n"
                     f"Playing: **{game_name}**"
                 )
 
@@ -392,10 +602,10 @@ async def status(
 
                 await interaction.response.send_message(
                     f"**{PLAYER_DISPLAY_NAME}** "
-                    f"(**{PLAYER_USERNAME}**) is currently "
-                    f"**In Game** 🎮\n"
-                    f"⚠️ Roblox did not provide enough "
-                    f"information to identify the experience."
+                    f"(**{PLAYER_USERNAME}**) "
+                    f"is currently **In Game** 🎮\n"
+                    f"⚠️ Roblox is hiding the "
+                    f"experience information."
                 )
 
             return
@@ -407,7 +617,8 @@ async def status(
 
         await interaction.response.send_message(
             f"**{PLAYER_DISPLAY_NAME}** "
-            f"(**{PLAYER_USERNAME}**) is currently "
+            f"(**{PLAYER_USERNAME}**) "
+            f"is currently "
             f"**{current_status}**."
         )
 
@@ -415,33 +626,39 @@ async def status(
     except requests.RequestException as error:
 
         print(
-            f"❌ Status lookup failed: {error}"
+            f"❌ Status lookup failed: "
+            f"{error}"
         )
 
         await interaction.response.send_message(
-            "❌ Roblox's presence service could not "
-            "be reached. Please try again later."
+            "❌ Roblox's presence service "
+            "could not be reached."
         )
+
 
     except Exception as error:
 
         print(
-            f"❌ Status command error: {error}"
+            f"❌ Status command error: "
+            f"{error}"
         )
 
         await interaction.response.send_message(
-            "❌ Something went wrong while checking "
-            "the player's status."
+            "❌ Something went wrong while "
+            "checking the player's status."
         )
 
 
 # ============================================================
-# /startwatch
+# /STARTWATCH
 # ============================================================
 
 @tree.command(
     name="startwatch",
-    description="Start monitoring the Roblox player every 30 seconds.",
+    description=(
+        "Start monitoring the Roblox "
+        "player every 30 seconds."
+    ),
     guild=GUILD
 )
 async def startwatch(
@@ -453,10 +670,6 @@ async def startwatch(
     global previous_status
     global previous_game
 
-
-    # --------------------------------------------------------
-    # Already watching
-    # --------------------------------------------------------
 
     if watching:
 
@@ -470,66 +683,77 @@ async def startwatch(
 
 
     # --------------------------------------------------------
-    # Initial lookup
+    # INITIAL LOOKUP
     # --------------------------------------------------------
 
     try:
 
-        presence = get_roblox_presence()
+        presence = (
+            get_roblox_presence()
+        )
 
-        previous_status = get_status_text(
-            presence
+        previous_status = (
+            get_status_text(
+                presence
+            )
         )
 
         previous_game = None
 
         if previous_status == "In Game":
 
-            previous_game = get_current_game(
-                presence
+            previous_game = (
+                get_current_game(
+                    presence
+                )
             )
 
 
     except requests.RequestException as error:
 
         print(
-            f"❌ Initial watcher lookup failed: {error}"
+            f"❌ Initial watcher lookup "
+            f"failed: {error}"
         )
 
         await interaction.response.send_message(
-            "❌ I couldn't get the player's current "
-            "Roblox status. Please try again."
+            "❌ I couldn't get the player's "
+            "current Roblox status."
         )
 
         return
+
 
     except Exception as error:
 
         print(
-            f"❌ Initial watcher error: {error}"
+            f"❌ Initial watcher error: "
+            f"{error}"
         )
 
         await interaction.response.send_message(
-            "❌ Something went wrong while starting "
-            "the watcher."
+            "❌ Something went wrong while "
+            "starting the watcher."
         )
 
         return
 
 
     # --------------------------------------------------------
-    # Start watcher
+    # START WATCHER
     # --------------------------------------------------------
 
     watching = True
 
-    watch_channel = interaction.channel
+    watch_channel = (
+        interaction.channel
+    )
 
     watch_loop.start()
 
 
     # --------------------------------------------------------
-    # Confirmation message
+    # CONFIRMATION
     # --------------------------------------------------------
 
     message = (
@@ -537,20 +761,23 @@ async def startwatch(
         f"**{PLAYER_DISPLAY_NAME}** "
         f"(**{PLAYER_USERNAME}**) "
         f"every 30 seconds.\n"
-        f"Current status: **{previous_status}**"
+        f"Current status: "
+        f"**{previous_status}**"
     )
+
 
     if previous_game:
 
         message += (
-            f"\n🎮 Playing: **{previous_game}**"
+            f"\n🎮 Playing: "
+            f"**{previous_game}**"
         )
 
     elif previous_status == "In Game":
 
         message += (
-            "\n⚠️ The player is in a game, "
-            "but Roblox did not provide its name."
+            "\n⚠️ Roblox isn't providing "
+            "the experience information."
         )
 
 
@@ -560,12 +787,14 @@ async def startwatch(
 
 
 # ============================================================
-# /stopwatch
+# /STOPWATCH
 # ============================================================
 
 @tree.command(
     name="stopwatch",
-    description="Stop monitoring the Roblox player.",
+    description=(
+        "Stop monitoring the Roblox player."
+    ),
     guild=GUILD
 )
 async def stopwatch(
@@ -607,12 +836,15 @@ async def stopwatch(
 
 
 # ============================================================
-# /player
+# /PLAYER
 # ============================================================
 
 @tree.command(
     name="player",
-    description="Show the Roblox account currently being monitored.",
+    description=(
+        "Show the Roblox account currently "
+        "being monitored."
+    ),
     guild=GUILD
 )
 async def player(
@@ -622,18 +854,21 @@ async def player(
     await interaction.response.send_message(
         f"👤 Currently monitoring "
         f"**{PLAYER_DISPLAY_NAME}** "
-        f"(**{PLAYER_USERNAME}**) "
-        f"(ID: `{PLAYER_ID}`)."
+        f"(**{PLAYER_USERNAME}**)\n"
+        f"ID: `{PLAYER_ID}`"
     )
 
 
 # ============================================================
-# /watchstatus
+# /WATCHSTATUS
 # ============================================================
 
 @tree.command(
     name="watchstatus",
-    description="Show whether automatic monitoring is running.",
+    description=(
+        "Show whether automatic monitoring "
+        "is running."
+    ),
     guild=GUILD
 )
 async def watchstatus(
@@ -643,29 +878,37 @@ async def watchstatus(
     if watching:
 
         await interaction.response.send_message(
-            f"🟢 Automatic monitoring is **running**.\n"
-            f"Watching: **{PLAYER_DISPLAY_NAME}** "
+            f"🟢 Automatic monitoring is "
+            f"**running**.\n"
+            f"Watching: "
+            f"**{PLAYER_DISPLAY_NAME}** "
             f"(**{PLAYER_USERNAME}**)"
         )
 
     else:
 
         await interaction.response.send_message(
-            "🔴 Automatic monitoring is **stopped**."
+            "🔴 Automatic monitoring is "
+            " **stopped**."
         )
 
 
 # ============================================================
-# /setplayer
+# /SETPLAYER
 # ============================================================
 
 @tree.command(
     name="setplayer",
-    description="Change the Roblox account being monitored.",
+    description=(
+        "Change the Roblox account "
+        "being monitored."
+    ),
     guild=GUILD
 )
 @app_commands.describe(
-    username="The Roblox username to monitor"
+    username=(
+        "The Roblox username to monitor"
+    )
 )
 async def setplayer(
     interaction: discord.Interaction,
@@ -684,21 +927,23 @@ async def setplayer(
         "v1/usernames/users"
     )
 
-    data = {
-        "usernames": [username],
+    payload = {
+        "usernames": [
+            username
+        ],
         "excludeBannedUsers": False
     }
 
 
     # --------------------------------------------------------
-    # Find Roblox user
+    # USER LOOKUP
     # --------------------------------------------------------
 
     try:
 
-        response = requests.post(
+        response = session.post(
             url,
-            json=data,
+            json=payload,
             timeout=10
         )
 
@@ -709,15 +954,16 @@ async def setplayer(
             []
         )
 
+
     except requests.RequestException as error:
 
         print(
-            f"❌ User lookup failed: {error}"
+            f"❌ User lookup failed: "
+            f"{error}"
         )
 
         await interaction.response.send_message(
-            "❌ Roblox's user lookup failed. "
-            "Please try again later."
+            "❌ Roblox's user lookup failed."
         )
 
         return
@@ -726,26 +972,32 @@ async def setplayer(
     if not users:
 
         await interaction.response.send_message(
-            f"❌ I couldn't find a Roblox user "
-            f"named `{username}`."
+            f"❌ I couldn't find a Roblox "
+            f"user named `{username}`."
         )
 
         return
 
 
     # --------------------------------------------------------
-    # Get user information
+    # USER INFORMATION
     # --------------------------------------------------------
 
-    new_username = users[0]["name"]
+    new_username = users[0][
+        "name"
+    ]
 
-    new_display_name = users[0]["displayName"]
+    new_display_name = users[0][
+        "displayName"
+    ]
 
-    new_id = users[0]["id"]
+    new_id = users[0][
+        "id"
+    ]
 
 
     # --------------------------------------------------------
-    # Already selected
+    # ALREADY SELECTED
     # --------------------------------------------------------
 
     if new_id == PLAYER_ID:
@@ -760,75 +1012,53 @@ async def setplayer(
 
 
     # --------------------------------------------------------
-    # Update target
+    # UPDATE PLAYER
     # --------------------------------------------------------
 
-    PLAYER_USERNAME = new_username
+    PLAYER_USERNAME = (
+        new_username
+    )
 
-    PLAYER_DISPLAY_NAME = new_display_name
+    PLAYER_DISPLAY_NAME = (
+        new_display_name
+    )
 
     PLAYER_ID = new_id
 
 
     # --------------------------------------------------------
-    # Refresh watcher baseline if watching
+    # REFRESH WATCHER BASELINE
     # --------------------------------------------------------
 
     if watching:
 
         try:
 
-            presence = get_roblox_presence()
+            presence = (
+                get_roblox_presence()
+            )
 
-            previous_status = get_status_text(
-                presence
+            previous_status = (
+                get_status_text(
+                    presence
+                )
             )
 
             previous_game = None
 
             if previous_status == "In Game":
 
-                previous_game = get_current_game(
-                    presence
+                previous_game = (
+                    get_current_game(
+                        presence
+                    )
                 )
-
-            print(
-                f"Watcher target changed to "
-                f"{PLAYER_DISPLAY_NAME} "
-                f"({PLAYER_USERNAME}). "
-                f"New baseline: "
-                f"{previous_status}"
-            )
-
-
-        except requests.RequestException as error:
-
-            print(
-                f"⚠️ Failed to refresh watcher state: "
-                f"{error}"
-            )
-
-            previous_status = None
-
-            previous_game = None
-
-            await interaction.response.send_message(
-                f"✅ Now monitoring "
-                f"**{PLAYER_DISPLAY_NAME}** "
-                f"(**{PLAYER_USERNAME}**) "
-                f"(ID: `{PLAYER_ID}`).\n"
-                f"⚠️ I couldn't get their current "
-                f"status, so the next check will "
-                f"establish the watcher baseline."
-            )
-
-            return
 
         except Exception as error:
 
             print(
-                f"⚠️ Failed to refresh watcher state: "
-                f"{error}"
+                f"⚠️ Failed to refresh "
+                f"watcher state: {error}"
             )
 
             previous_status = None
@@ -846,18 +1076,20 @@ async def setplayer(
     await interaction.response.send_message(
         f"✅ Now monitoring "
         f"**{PLAYER_DISPLAY_NAME}** "
-        f"(**{PLAYER_USERNAME}**) "
-        f"(ID: `{PLAYER_ID}`)."
+        f"(**{PLAYER_USERNAME}**)\n"
+        f"ID: `{PLAYER_ID}`"
     )
 
 
 # ============================================================
-# /help
+# /HELP
 # ============================================================
 
 @tree.command(
     name="help",
-    description="Show all available commands.",
+    description=(
+        "Show all available commands."
+    ),
     guild=GUILD
 )
 async def help_command(
@@ -871,29 +1103,30 @@ async def help_command(
         "Checks if the bot is working.\n\n"
 
         "**`/status`**\n"
-        "Immediately checks the player's current "
-        "Roblox status and game.\n\n"
+        "Immediately checks the player's "
+        "current status and experience.\n\n"
 
         "**`/startwatch`**\n"
-        "Starts automatic monitoring every 30 "
-        "seconds.\n\n"
+        "Starts automatic monitoring every "
+        "30 seconds.\n\n"
 
         "**`/stopwatch`**\n"
         "Stops automatic monitoring.\n\n"
 
         "**`/setplayer username:`**\n"
-        "Changes the Roblox account being monitored.\n\n"
+        "Changes the Roblox account being "
+        "monitored.\n\n"
 
         "**`/player`**\n"
-        "Shows the currently monitored Roblox "
-        "account.\n\n"
+        "Shows the currently monitored "
+        "Roblox account.\n\n"
 
         "**`/watchstatus`**\n"
-        "Shows whether automatic monitoring is "
-        "running.\n\n"
+        "Shows whether automatic monitoring "
+        "is running.\n\n"
 
         "**`/help`**\n"
-        "Shows all available commands."
+        "Shows this help message."
     )
 
 
@@ -906,7 +1139,9 @@ async def help_command(
 # 30-SECOND WATCHER
 # ============================================================
 
-@tasks.loop(seconds=30)
+@tasks.loop(
+    seconds=30
+)
 async def watch_loop():
 
     global previous_status
@@ -915,31 +1150,41 @@ async def watch_loop():
 
     try:
 
-        presence = get_roblox_presence()
+        # ----------------------------------------------------
+        # GET PRESENCE
+        # ----------------------------------------------------
 
-        current_status = get_status_text(
-            presence
+        presence = (
+            get_roblox_presence()
+        )
+
+        current_status = (
+            get_status_text(
+                presence
+            )
         )
 
 
         print(
-            f"Checked {PLAYER_DISPLAY_NAME} "
+            f"Checked "
+            f"{PLAYER_DISPLAY_NAME} "
             f"({PLAYER_USERNAME}): "
             f"{current_status}"
         )
 
 
+        # ----------------------------------------------------
+        # GET CURRENT GAME
+        # ----------------------------------------------------
+
         current_game = None
-
-
-        # ----------------------------------------------------
-        # Get game
-        # ----------------------------------------------------
 
         if current_status == "In Game":
 
-            current_game = get_current_game(
-                presence
+            current_game = (
+                get_current_game(
+                    presence
+                )
             )
 
             if current_game:
@@ -952,20 +1197,25 @@ async def watch_loop():
             else:
 
                 print(
-                    "In Game, but the experience "
-                    "could not be identified."
+                    "In Game, but Roblox "
+                    "did not expose the "
+                    "experience."
                 )
 
 
         # ----------------------------------------------------
-        # First check
+        # FIRST CHECK
         # ----------------------------------------------------
 
         if previous_status is None:
 
-            previous_status = current_status
+            previous_status = (
+                current_status
+            )
 
-            previous_game = current_game
+            previous_game = (
+                current_game
+            )
 
             print(
                 "Watcher baseline established."
@@ -975,14 +1225,13 @@ async def watch_loop():
 
 
         # ----------------------------------------------------
-        # Same status
+        # SAME STATUS
         # ----------------------------------------------------
 
         if current_status == previous_status:
 
-
             # ------------------------------------------------
-            # Game changed while still in game
+            # GAME CHANGED
             # ------------------------------------------------
 
             if (
@@ -990,15 +1239,19 @@ async def watch_loop():
                 and current_game != previous_game
             ):
 
-                old_game = previous_game
+                old_game = (
+                    previous_game
+                )
 
-                previous_game = current_game
+                previous_game = (
+                    current_game
+                )
 
 
                 if watch_channel is not None:
 
                     # ----------------------------------------
-                    # New game identified
+                    # NEW GAME FOUND
                     # ----------------------------------------
 
                     if current_game:
@@ -1006,7 +1259,8 @@ async def watch_loop():
                         if old_game:
 
                             message = (
-                                f"🎮 **{PLAYER_DISPLAY_NAME}** "
+                                f"🎮 "
+                                f"**{PLAYER_DISPLAY_NAME}** "
                                 f"(**{PLAYER_USERNAME}**) "
                                 f"changed experience:\n"
                                 f"**{old_game}** → "
@@ -1016,7 +1270,8 @@ async def watch_loop():
                         else:
 
                             message = (
-                                f"🎮 **{PLAYER_DISPLAY_NAME}** "
+                                f"🎮 "
+                                f"**{PLAYER_DISPLAY_NAME}** "
                                 f"(**{PLAYER_USERNAME}**) "
                                 f"is playing "
                                 f"**{current_game}**"
@@ -1024,16 +1279,18 @@ async def watch_loop():
 
 
                     # ----------------------------------------
-                    # Still in game, but name unavailable
+                    # GAME UNKNOWN
                     # ----------------------------------------
 
                     else:
 
                         message = (
-                            f"🎮 **{PLAYER_DISPLAY_NAME}** "
+                            f"🎮 "
+                            f"**{PLAYER_DISPLAY_NAME}** "
                             f"(**{PLAYER_USERNAME}**) "
-                            f"is in a game, but Roblox "
-                            f"didn't provide its name."
+                            f"is in a game, but "
+                            f"Roblox didn't expose "
+                            f"the experience name."
                         )
 
 
@@ -1056,16 +1313,23 @@ async def watch_loop():
         # STATUS CHANGED
         # ----------------------------------------------------
 
-        old_status = previous_status
+        old_status = (
+            previous_status
+        )
 
-        previous_status = current_status
+        previous_status = (
+            current_status
+        )
 
-        previous_game = current_game
+        previous_game = (
+            current_game
+        )
 
 
         print(
             f"Status changed: "
-            f"{old_status} -> {current_status}"
+            f"{old_status} → "
+            f"{current_status}"
         )
 
 
@@ -1080,28 +1344,29 @@ async def watch_loop():
 
         if current_status == "In Game":
 
-
             if current_game:
 
                 message = (
-                    f"🔄 **{PLAYER_DISPLAY_NAME}** "
+                    f"🔄 "
+                    f"**{PLAYER_DISPLAY_NAME}** "
                     f"(**{PLAYER_USERNAME}**) "
                     f"changed status:\n"
                     f"**{old_status}** → "
                     f"**In Game**\n"
-                    f"🎮 Playing: **{current_game}**"
+                    f"🎮 Playing: "
+                    f"**{current_game}**"
                 )
-
 
             else:
 
                 message = (
-                    f"🔄 **{PLAYER_DISPLAY_NAME}** "
+                    f"🔄 "
+                    f"**{PLAYER_DISPLAY_NAME}** "
                     f"(**{PLAYER_USERNAME}**) "
                     f"changed status:\n"
                     f"**{old_status}** → "
                     f"**In Game**\n"
-                    f"⚠️ Roblox did not provide "
+                    f"⚠️ Roblox did not expose "
                     f"the experience name."
                 )
 
@@ -1113,7 +1378,8 @@ async def watch_loop():
         else:
 
             message = (
-                f"🔄 **{PLAYER_DISPLAY_NAME}** "
+                f"🔄 "
+                f"**{PLAYER_DISPLAY_NAME}** "
                 f"(**{PLAYER_USERNAME}**) "
                 f"changed status:\n"
                 f"**{old_status}** → "
@@ -1133,13 +1399,15 @@ async def watch_loop():
     except requests.RequestException as error:
 
         print(
-            f"⚠️ Roblox API error: {error}"
+            f"⚠️ Roblox API error: "
+            f"{error}"
         )
 
     except Exception as error:
 
         print(
-            f"⚠️ Watcher error: {error}"
+            f"⚠️ Watcher error: "
+            f"{error}"
         )
 
 
@@ -1155,4 +1423,6 @@ if not TOKEN:
     )
 
 
-client.run(TOKEN)
+client.run(
+    TOKEN
+)
